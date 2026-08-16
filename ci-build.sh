@@ -10,7 +10,7 @@ echo "Building Java Application with Maven"
 mvn clean package
 
 echo "checking war file"
-ls -lh /target/*.war
+ls -lh target/*.war
 
 echo "Buiilding Docker Image"
 docker build -t devops-java-app:ci .
