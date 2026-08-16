@@ -1,0 +1,57 @@
+name: Java DevOps CI
+
+on:
+  push:
+    branches:
+      - main
+
+  pull_request:
+    branches:
+      - main
+
+jobs:
+
+  build:
+    name: Build and Test
+    runs-on: [self-hosted, linux, x64]
+
+    steps:
+
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Check Java Version
+        run: java --version
+
+      - name: Check Maven Version
+        run: mvn --version
+
+      - name: Build and Test
+        run: mvn clean package
+
+      - name: Verify WAR Artifact
+        run: ls -lh target/*.war
+
+      - name: Build Docker Image
+        run: docker build -t devops-java-app:ci .
+
+      - name: Start Application
+        run: |
+          docker rm -f devops-java-ci 2>/dev/null || true
+
+          docker run -d \
+            --name devops-java-ci \
+            -p 8081:8080 \
+            devops-java-app:ci
+
+      - name: Wait for Application
+        run: sleep 10
+
+      - name: Smoke Test
+        run: |
+          curl -f http://localhost:8081/devops-lab/
+
+      - name: Cleanup
+        if: always()
+        run: |
+          docker rm -f devops-java-ci 2>/dev/null || true
