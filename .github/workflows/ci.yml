@@ -9,6 +9,10 @@ on:
     branches:
       - main
 
+permissions:
+  contents: read
+  packages: write     
+
 jobs:
 
   build:
@@ -35,6 +39,7 @@ jobs:
       - name: Build Docker Image
         run: docker build -t devops-java-app:ci .
 
+
       - name: Start Application
         run: |
           docker rm -f devops-java-ci 2>/dev/null || true
@@ -50,6 +55,19 @@ jobs:
       - name: Smoke Test
         run: |
           curl -f http://localhost:8081/devops-lab/
+      
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Tag Docker Image
+        run: docker tag devops-java-app:ci ghcr.io/aashish-cyber/devops-java-lab:v3
+        
+      - name: Push Docker Image to GHCR
+        run: docker push ghcr.io/aashish-cyber/devops-java-lab:v3
 
       - name: Cleanup
         if: always()
