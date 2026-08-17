@@ -1,4 +1,4 @@
-name: Java DevOps CI
+name: Java DevOps CI-CD
 
 on:
   push:
@@ -11,12 +11,15 @@ on:
 
 permissions:
   contents: read
-  packages: write     
+  packages: write
 
 jobs:
 
+  # ==========================================
+  # CI JOB
+  # ==========================================
   build:
-    name: Build and Test
+    name: Build, Test & Push Image
     runs-on: [self-hosted, linux, x64]
 
     steps:
@@ -37,25 +40,11 @@ jobs:
         run: ls -lh target/*.war
 
       - name: Build Docker Image
-        run: docker build -t devops-java-app:ci .
-
-
-      - name: Start Application
         run: |
-          docker rm -f devops-java-ci 2>/dev/null || true
+          docker build \
+            -t ghcr.io/aashish-cyber/devops-java-lab:v3 \
+            .
 
-          docker run -d \
-            --name devops-java-ci \
-            -p 8081:8080 \
-            devops-java-app:ci
-
-      - name: Wait for Application
-        run: sleep 10
-
-      - name: Smoke Test
-        run: |
-          curl -f http://localhost:8081/devops-lab/
-      
       - name: Login to GHCR
         uses: docker/login-action@v3
         with:
@@ -63,13 +52,56 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Tag Docker Image
-        run: docker tag devops-java-app:ci ghcr.io/aashish-cyber/devops-java-lab:v3
-        
-      - name: Push Docker Image to GHCR
-        run: docker push ghcr.io/aashish-cyber/devops-java-lab:v3
-
-      - name: Cleanup
-        if: always()
+      - name: Push Image to GHCR
         run: |
-          docker rm -f devops-java-ci 2>/dev/null || true
+          docker push ghcr.io/aashish-cyber/devops-java-lab:v3
+
+
+  # ==========================================
+  # CD JOB
+  # ==========================================
+  deploy:
+    name: Deploy Application
+    needs: build
+    runs-on: [self-hosted, linux, x64]
+
+    steps:
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull Image from GHCR
+        run: |
+          docker pull ghcr.io/aashish-cyber/devops-java-lab:v3
+
+      - name: Stop Existing Application
+        run: |
+          docker rm -f devops-java-deploy 2>/dev/null || true
+
+      - name: Start Application
+        run: |
+          docker run -d \
+            --name devops-java-deploy \
+            -p 8082:8080 \
+            ghcr.io/aashish-cyber/devops-java-lab:v3
+
+      - name: Wait for Application
+        run: sleep 10
+
+      - name: Smoke Test
+        run: |
+          curl -f http://localhost:8082/devops-lab/
+
+      - name: Deployment Successful
+        run: |
+          echo "====================================="
+          echo "       DEPLOYMENT SUCCESSFUL"
+          echo "====================================="
+
+      - name: Show Running Container
+        run: |
+          docker ps --filter name=devops-java-deploy
