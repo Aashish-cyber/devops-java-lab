@@ -4,7 +4,7 @@
 </head>
 <body>
     <h1>Hello from Aashish's Java DevOps Lab!</h1>
-    <h2>Application Versioning:V3</h2>
-    <p>Deployed using Maven+Docker+Tomcat</p>
+    <h2>Application Versioning:V4</h2>
+    <p>Deployed using Githb Actions + GHCR</p>
 </body>
 </html>
