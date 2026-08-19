@@ -161,7 +161,7 @@ jobs:
 
             docker run -d \
               --name devops-java-deploy \
-              -p 8082:8080 \
+              -p 8082:8083 \
               "$PREVIOUS_IMAGE"
 
             sleep 10
