@@ -110,7 +110,7 @@ jobs:
         run: |
           docker run -d \
             --name devops-java-deploy \
-            -p 8082:8080 \
+            -p 8082:8086 \
             $IMAGE_NAME:$IMAGE_TAG
 
       - name: Health Check
@@ -161,7 +161,7 @@ jobs:
 
             docker run -d \
               --name devops-java-deploy \
-              -p 8082:8086 \
+              -p 8082:8080 \
               "$PREVIOUS_IMAGE"
 
             sleep 10
