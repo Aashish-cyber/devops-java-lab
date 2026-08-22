@@ -73,6 +73,7 @@ jobs:
   # ==========================================
   deploy:
     name: Blue/Green Deployment
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: build
     runs-on: [self-hosted, linux, x64]
 
@@ -85,7 +86,10 @@ jobs:
       GREEN_PORT: 8083
 
     steps:
-
+      # 0. Checkout Repository
+      # ==========================================
+      - name: Checkout Code
+        uses: actions/checkout@v4
       # ==========================================
       # 1. Generate Image Tag
       # ==========================================
