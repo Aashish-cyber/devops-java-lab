@@ -236,9 +236,12 @@ jobs:
       - name: Deploy Green Nginx Config
         if: success()
         run: |
-          docker cp \
-            /tmp/nginx-green.conf \
-            $NGINX_CONTAINER:/etc/nginx/nginx.conf
+            echo "Updating host-side Nginx configuration..."
+
+            cp /tmp/nginx-green.conf nginx/nginx.conf
+
+            echo "Current Nginx configuration:"
+            cat nginx/nginx.conf
 
 
       # ==========================================
@@ -311,31 +314,28 @@ jobs:
         run: |
           echo "====================================="
           echo "       DEPLOYMENT FAILED"
-          echo "       ROLLING BACK TRAFFIC"
+          echo "       ROLLING BACK TO BLUE"
           echo "====================================="
 
           echo "Green container logs:"
           docker logs $GREEN_CONTAINER 2>/dev/null || true
 
-          echo "Preparing BLUE configuration..."
+          echo "Restoring Blue Nginx configuration..."
 
-          cp nginx/nginx.conf /tmp/nginx-blue.conf
+          git checkout -- nginx/nginx.conf
 
-          sed -i \
-            's/server devops-java-green:8080;/server devops-java-deploy:8080;/' \
-            /tmp/nginx-blue.conf
+          echo "Restored configuration:"
+          cat nginx/nginx.conf
 
-          docker cp \
-            /tmp/nginx-blue.conf \
-            $NGINX_CONTAINER:/etc/nginx/nginx.conf
+          echo "Validating Nginx configuration..."
 
           docker exec $NGINX_CONTAINER nginx -t
 
+          echo "Reloading Nginx..."
+
           docker exec $NGINX_CONTAINER nginx -s reload
 
-          echo "Traffic rolled back to BLUE."
-
-          echo "Verifying BLUE..."
+          echo "Verifying Blue traffic..."
 
           curl -fsS \
             http://localhost:8080/devops-lab/ \
