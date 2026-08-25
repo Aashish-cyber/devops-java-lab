@@ -366,7 +366,7 @@ jobs:
       # 14. Rollback Traffic to BLUE
       # ==========================================
       - name: Automatic Rollback Traffic to Blue
-        if: failure() && steps.save_blue.outcome == 'success'
+        if: ${{ always() && steps.save_blue.outcome == 'success' && (failure() || (github.event_name == 'workflow_dispatch' && inputs.simulate_failure)) }}
         run: |
           set -e
 
