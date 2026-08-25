@@ -1,5 +1,5 @@
 name: Java DevOps CI-CD
-
+#This Workflow is designed to build, test, and deploy a Java application using Maven and Docker. It implements a blue/green deployment strategy to ensure zero downtime during updates.
 on:
   push:
     branches:
