@@ -10,6 +10,14 @@ on:
     branches:
       - main
 
+  workflow_dispatch:
+    inputs:
+      simulate_failure:
+        description: Simulate a production verification failure after switching to Green
+        required: false
+        type: boolean
+        default: false
+
 permissions:
   contents: read
   packages: write
@@ -74,7 +82,7 @@ jobs:
   # ==========================================
   deploy:
     name: Blue/Green Deployment
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
     needs: build
     runs-on: [self-hosted, linux, x64]
 
@@ -85,6 +93,8 @@ jobs:
       DOCKER_NETWORK: blue-green-net
       BLUE_PORT: 8082
       GREEN_PORT: 8083
+      ROLLBACK_IMAGE: devops-java-app:stable-blue
+      ROLLBACK_ARCHIVE: /tmp/devops-java-stable-blue.tar
 
     steps:
       # 0. Checkout Repository
@@ -147,6 +157,28 @@ jobs:
             > /tmp/blue-health.html
 
           cat /tmp/blue-health.html
+
+
+      # ==========================================
+      # 5. Save Current Production Image
+      # ==========================================
+      - name: Save Blue Image for Rollback
+        id: save_blue
+        run: |
+          echo "Saving the current Blue image as the rollback version..."
+
+          BLUE_IMAGE=$(docker inspect --format '{{.Config.Image}}' "$BLUE_CONTAINER")
+          if [ -z "$BLUE_IMAGE" ]; then
+            echo "ERROR: Could not determine the image used by Blue."
+            exit 1
+          fi
+
+          docker tag "$BLUE_IMAGE" "$ROLLBACK_IMAGE"
+          docker save --output "$ROLLBACK_ARCHIVE" "$ROLLBACK_IMAGE"
+          cp nginx/nginx.conf /tmp/nginx-blue.conf
+
+          echo "Rollback image: $ROLLBACK_IMAGE"
+          echo "Rollback archive: $ROLLBACK_ARCHIVE"
 
 
       # ==========================================
@@ -292,18 +324,17 @@ jobs:
           echo "Production traffic successfully reaches GREEN."
 
       # ==========================================
-      # TEMPORARY ROLLBACK TEST
-      # REMOVE AFTER TESTING
+      # Optional rollback drill for manual workflow runs
       # ==========================================
 
-      - name: simulate Post-Deployment Failure
-        if : success()
+      - name: Simulate Post-Deployment Failure
+        if: success() && github.event_name == 'workflow_dispatch' && inputs.simulate_failure
         run: |
           echo "====================================="
           echo "   SIMULATING POST-DEPLOYMENT FAILURE"
           echo "====================================="
 
-          exit 1    # ==========================================
+          exit 1
 
       # 13. Deployment Successful
       # ==========================================
@@ -323,19 +354,34 @@ jobs:
       # 14. Rollback Traffic to BLUE
       # ==========================================
       - name: Automatic Rollback Traffic to Blue 
-        if: failure()
+        if: failure() && steps.save_blue.outcome == 'success'
         run: |
+          set -e
+
           echo "====================================="
           echo "       DEPLOYMENT FAILED"
           echo "       ROLLING BACK TO BLUE"
           echo "====================================="
 
-          echo "Green container logs:"
+          echo "Restoring saved Blue image and container..."
+
+          if [ -f "$ROLLBACK_ARCHIVE" ]; then
+            docker load --input "$ROLLBACK_ARCHIVE"
+          fi
+
           docker logs $GREEN_CONTAINER 2>/dev/null || true
+          docker rm -f "$GREEN_CONTAINER" 2>/dev/null || true
+          docker rm -f "$BLUE_CONTAINER" 2>/dev/null || true
+
+          docker run -d \
+            --name "$BLUE_CONTAINER" \
+            --network "$DOCKER_NETWORK" \
+            -p "$BLUE_PORT:8080" \
+            "$ROLLBACK_IMAGE"
 
           echo "Restoring Blue Nginx configuration..."
 
-          git checkout -- nginx/nginx.conf
+          cp /tmp/nginx-blue.conf nginx/nginx.conf
 
           echo "Restored configuration:"
           cat nginx/nginx.conf
@@ -350,21 +396,18 @@ jobs:
 
           echo "Verifying Blue traffic..."
 
-          curl -fsS \
-            http://localhost:8080/devops-lab/ \
-            > /tmp/rollback.html
+          for i in {1..12}; do
+            if curl -fsS http://localhost:8080/devops-lab/ > /tmp/rollback.html; then
+              echo "Rollback verification passed on attempt $i/12."
+              cat /tmp/rollback.html
+              exit 0
+            fi
+            sleep 5
+          done
 
-          cat /tmp/rollback.html
-
-          if grep -q "Application Versioning:V4" /tmp/rollback.html; then
-            echo "====================================="
-            echo "       ROLLBACK SUCCESSFUL"
-            echo "       BLUE IS ACTIVE"
-            echo "====================================="
-          else
-            echo "Rollback verification FAILED"
-            exit 1
-          fi
+          echo "Rollback verification FAILED"
+          docker logs "$BLUE_CONTAINER" || true
+          exit 1
 
 
       # ==========================================
