@@ -165,18 +165,30 @@ jobs:
       - name: Save Blue Image for Rollback
         id: save_blue
         run: |
-          echo "Saving the current Blue image as the rollback version..."
+          echo "Saving the current production image as the Blue rollback version..."
 
-          BLUE_IMAGE=$(docker inspect --format '{{.Config.Image}}' "$BLUE_CONTAINER")
-          if [ -z "$BLUE_IMAGE" ]; then
-            echo "ERROR: Could not determine the image used by Blue."
+          ACTIVE_CONTAINER=$(docker exec "$NGINX_CONTAINER" nginx -T 2>/dev/null \
+            | awk '/server devops-java-(deploy|green):8080;/{sub(":8080;", "", $2); print $2; exit}')
+          if [ -z "$ACTIVE_CONTAINER" ]; then
+            echo "ERROR: Could not determine the production backend from Nginx."
             exit 1
           fi
 
-          docker tag "$BLUE_IMAGE" "$ROLLBACK_IMAGE"
-          docker save --output "$ROLLBACK_ARCHIVE" "$ROLLBACK_IMAGE"
-          cp nginx/nginx.conf /tmp/nginx-blue.conf
+          ACTIVE_IMAGE=$(docker inspect --format '{{.Config.Image}}' "$ACTIVE_CONTAINER")
+          if [ -z "$ACTIVE_IMAGE" ]; then
+            echo "ERROR: Could not determine the production image."
+            exit 1
+          fi
 
+          docker tag "$ACTIVE_IMAGE" "$ROLLBACK_IMAGE"
+          docker save --output "$ROLLBACK_ARCHIVE" "$ROLLBACK_IMAGE"
+          docker exec "$NGINX_CONTAINER" cat /etc/nginx/nginx.conf > /tmp/nginx-blue.conf
+          sed -i \
+            's/server devops-java-green:8080;/server devops-java-deploy:8080;/' \
+            /tmp/nginx-blue.conf
+
+          echo "Production backend: $ACTIVE_CONTAINER"
+          echo "Production image: $ACTIVE_IMAGE"
           echo "Rollback image: $ROLLBACK_IMAGE"
           echo "Rollback archive: $ROLLBACK_ARCHIVE"
 
@@ -353,7 +365,7 @@ jobs:
       # ==========================================
       # 14. Rollback Traffic to BLUE
       # ==========================================
-      - name: Automatic Rollback Traffic to Blue 
+      - name: Automatic Rollback Traffic to Blue
         if: failure() && steps.save_blue.outcome == 'success'
         run: |
           set -e
@@ -398,9 +410,11 @@ jobs:
 
           for i in {1..12}; do
             if curl -fsS http://localhost:8080/devops-lab/ > /tmp/rollback.html; then
-              echo "Rollback verification passed on attempt $i/12."
               cat /tmp/rollback.html
-              exit 0
+              if grep -q 'Application Versioning:V5' /tmp/rollback.html; then
+                echo "Rollback verification passed on attempt $i/12: production is V5."
+                exit 0
+              fi
             fi
             sleep 5
           done
