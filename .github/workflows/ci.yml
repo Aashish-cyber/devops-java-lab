@@ -10,14 +10,6 @@ on:
     branches:
       - main
 
-  workflow_dispatch:
-    inputs:
-      simulate_failure:
-        description: Simulate a production verification failure after switching to Green
-        required: false
-        type: boolean
-        default: false
-
 permissions:
   contents: read
   packages: write
@@ -82,7 +74,7 @@ jobs:
   # ==========================================
   deploy:
     name: Blue/Green Deployment
-    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: build
     runs-on: [self-hosted, linux, x64]
 
@@ -93,8 +85,6 @@ jobs:
       DOCKER_NETWORK: blue-green-net
       BLUE_PORT: 8082
       GREEN_PORT: 8083
-      ROLLBACK_IMAGE: devops-java-app:stable-blue
-      ROLLBACK_ARCHIVE: /tmp/devops-java-stable-blue.tar
 
     steps:
       # 0. Checkout Repository
@@ -157,41 +147,6 @@ jobs:
             > /tmp/blue-health.html
 
           cat /tmp/blue-health.html
-
-
-      # ==========================================
-      # 5. Save Current Production Image
-      # ==========================================
-      - name: Save Blue Image for Rollback
-        id: save_blue
-        run: |
-          echo "Saving the current production image as the Blue rollback version..."
-
-          ACTIVE_CONTAINER=$(docker exec "$NGINX_CONTAINER" cat /etc/nginx/nginx.conf \
-            | sed -nE 's/^[[:space:]]*server (devops-java-(deploy|green)):8080;[[:space:]]*$/\1/p' \
-            | head -n 1)
-          if [ -z "$ACTIVE_CONTAINER" ]; then
-            echo "ERROR: Could not determine the production backend from Nginx."
-            exit 1
-          fi
-
-          ACTIVE_IMAGE=$(docker inspect --format '{{.Config.Image}}' "$ACTIVE_CONTAINER")
-          if [ -z "$ACTIVE_IMAGE" ]; then
-            echo "ERROR: Could not determine the production image."
-            exit 1
-          fi
-
-          docker tag "$ACTIVE_IMAGE" "$ROLLBACK_IMAGE"
-          docker save --output "$ROLLBACK_ARCHIVE" "$ROLLBACK_IMAGE"
-          docker exec "$NGINX_CONTAINER" cat /etc/nginx/nginx.conf > /tmp/nginx-blue.conf
-          sed -i \
-            's/server devops-java-green:8080;/server devops-java-deploy:8080;/' \
-            /tmp/nginx-blue.conf
-
-          echo "Production backend: $ACTIVE_CONTAINER"
-          echo "Production image: $ACTIVE_IMAGE"
-          echo "Rollback image: $ROLLBACK_IMAGE"
-          echo "Rollback archive: $ROLLBACK_ARCHIVE"
 
 
       # ==========================================
@@ -259,6 +214,7 @@ jobs:
 
 
       # ==========================================
+            # ==========================================
       # 8. Prepare GREEN Nginx Configuration
       # ==========================================
       - name: Prepare Green Nginx Config
@@ -277,30 +233,32 @@ jobs:
 
 
       # ==========================================
-      # 9. Copy GREEN Config to Nginx
+      # 9. Deploy GREEN Nginx Config
       # ==========================================
       - name: Deploy Green Nginx Config
         if: success()
         run: |
-            echo "Updating host-side Nginx configuration..."
+          echo "Updating host-side Nginx configuration..."
 
-            cp /tmp/nginx-green.conf nginx/nginx.conf
+          cp /tmp/nginx-green.conf nginx/nginx.conf
 
-            echo "Current Nginx configuration:"
-            cat nginx/nginx.conf
+          echo "Current Nginx configuration:"
+          cat nginx/nginx.conf
 
 
       # ==========================================
-      # 10. Validate Nginx
+      # 10. Validate Nginx Configuration
       # ==========================================
       - name: Validate Nginx Configuration
         if: success()
         run: |
-          docker exec $NGINX_CONTAINER nginx -t
+          echo "Validating Nginx configuration..."
+
+          docker exec "$NGINX_CONTAINER" nginx -t
 
 
       # ==========================================
-      # 11. Switch Traffic to GREEN
+      # 11. Switch Traffic BLUE → GREEN
       # ==========================================
       - name: Switch Traffic to Green
         if: success()
@@ -310,7 +268,7 @@ jobs:
           echo "          BLUE → GREEN"
           echo "====================================="
 
-          docker exec $NGINX_CONTAINER nginx -s reload
+          docker exec "$NGINX_CONTAINER" nginx -s reload
 
           echo "Nginx traffic switched to GREEN."
 
@@ -319,7 +277,6 @@ jobs:
       # 12. Verify Production Traffic
       # ==========================================
       - name: Verify Production Traffic
-        id: production_test
         if: success()
         run: |
           echo "====================================="
@@ -332,24 +289,38 @@ jobs:
             http://localhost:8080/devops-lab/ \
             > /tmp/production.html
 
+          echo "Production response:"
           cat /tmp/production.html
 
+          echo ""
           echo "Production traffic successfully reaches GREEN."
 
-      # ==========================================
-      # Optional rollback drill for manual workflow runs
-      # ==========================================
 
+      # ==========================================
+      # 13. TEMPORARY ROLLBACK TEST
+      # ==========================================
+      # IMPORTANT:
+      # This intentionally fails AFTER traffic has
+      # already been switched to GREEN.
+      #
+      # This should trigger the rollback step below.
+      # ==========================================
       - name: Simulate Post-Deployment Failure
-        if: success() && github.event_name == 'workflow_dispatch' && inputs.simulate_failure
+        if: success()
         run: |
           echo "====================================="
           echo "   SIMULATING POST-DEPLOYMENT FAILURE"
           echo "====================================="
 
+          echo "GREEN is currently serving production traffic."
+
+          echo "Intentionally failing deployment..."
+
           exit 1
 
-      # 13. Deployment Successful
+
+      # ==========================================
+      # 14. Deployment Successful
       # ==========================================
       - name: Deployment Successful
         if: success()
@@ -364,69 +335,85 @@ jobs:
 
 
       # ==========================================
-      # 14. Rollback Traffic to BLUE
+      # 15. AUTOMATIC ROLLBACK
       # ==========================================
       - name: Automatic Rollback Traffic to Blue
-        if: ${{ always() && steps.save_blue.outcome == 'success' && (failure() || (github.event_name == 'workflow_dispatch' && inputs.simulate_failure)) }}
+        if: failure()
         run: |
-          set -e
-
           echo "====================================="
           echo "       DEPLOYMENT FAILED"
           echo "       ROLLING BACK TO BLUE"
           echo "====================================="
 
-          echo "Restoring saved Blue image and container..."
+          echo ""
+          echo "Green container logs:"
+          echo "-------------------------------------"
 
-          if [ -f "$ROLLBACK_ARCHIVE" ]; then
-            docker load --input "$ROLLBACK_ARCHIVE"
-          fi
+          docker logs "$GREEN_CONTAINER" 2>/dev/null || true
 
-          docker logs $GREEN_CONTAINER 2>/dev/null || true
-          docker rm -f "$GREEN_CONTAINER" 2>/dev/null || true
-          docker rm -f "$BLUE_CONTAINER" 2>/dev/null || true
+          echo ""
+          echo "Restoring BLUE Nginx configuration..."
+          echo "-------------------------------------"
 
-          docker run -d \
-            --name "$BLUE_CONTAINER" \
-            --network "$DOCKER_NETWORK" \
-            -p "$BLUE_PORT:8080" \
-            "$ROLLBACK_IMAGE"
-
-          echo "Restoring Blue Nginx configuration..."
-
-          cp /tmp/nginx-blue.conf nginx/nginx.conf
+          git checkout -- nginx/nginx.conf
 
           echo "Restored configuration:"
           cat nginx/nginx.conf
 
+          echo ""
           echo "Validating Nginx configuration..."
+          echo "-------------------------------------"
 
-          docker exec $NGINX_CONTAINER nginx -t
+          docker exec "$NGINX_CONTAINER" nginx -t
 
+          if [ $? -ne 0 ]; then
+            echo "ERROR: Nginx configuration validation failed!"
+            exit 1
+          fi
+
+          echo ""
           echo "Reloading Nginx..."
+          echo "-------------------------------------"
 
-          docker exec $NGINX_CONTAINER nginx -s reload
+          docker exec "$NGINX_CONTAINER" nginx -s reload
 
-          echo "Verifying Blue traffic..."
+          echo "Nginx reloaded successfully."
 
-          for i in {1..12}; do
-            if curl -fsS http://localhost:8080/devops-lab/ > /tmp/rollback.html; then
-              cat /tmp/rollback.html
-              if grep -q 'Application Versioning:V5' /tmp/rollback.html; then
-                echo "Rollback verification passed on attempt $i/12: production is V5."
-                exit 0
-              fi
-            fi
-            sleep 5
-          done
+          echo ""
+          echo "Waiting for Blue traffic..."
+          sleep 2
 
-          echo "Rollback verification FAILED"
-          docker logs "$BLUE_CONTAINER" || true
-          exit 1
+          echo ""
+          echo "Verifying production traffic..."
+          echo "-------------------------------------"
+
+          if curl -fsS \
+            http://localhost:8080/devops-lab/ \
+            > /tmp/rollback.html; then
+
+            echo "Production endpoint is responding."
+
+            echo ""
+            echo "BLUE response:"
+            cat /tmp/rollback.html
+
+          else
+
+            echo "ERROR: Production endpoint is not responding after rollback."
+
+            exit 1
+
+          fi
+
+          echo ""
+          echo "====================================="
+          echo "       ROLLBACK SUCCESSFUL"
+          echo "       BLUE IS ACTIVE"
+          echo "====================================="
 
 
       # ==========================================
-      # 15. Show Final State
+      # 16. Show Final Container State
       # ==========================================
       - name: Show Running Containers
         if: always()
@@ -439,3 +426,10 @@ jobs:
             --filter "name=$BLUE_CONTAINER" \
             --filter "name=$GREEN_CONTAINER" \
             --filter "name=$NGINX_CONTAINER"
+
+          echo ""
+          echo "====================================="
+          echo "       FINAL NGINX CONFIG"
+          echo "====================================="
+
+          cat nginx/nginx.conf
