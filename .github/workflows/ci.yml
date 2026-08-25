@@ -167,8 +167,9 @@ jobs:
         run: |
           echo "Saving the current production image as the Blue rollback version..."
 
-          ACTIVE_CONTAINER=$(docker exec "$NGINX_CONTAINER" nginx -T 2>/dev/null \
-            | awk '/server devops-java-(deploy|green):8080;/{sub(":8080;", "", $2); print $2; exit}')
+          ACTIVE_CONTAINER=$(docker exec "$NGINX_CONTAINER" cat /etc/nginx/nginx.conf \
+            | sed -nE 's/^[[:space:]]*server (devops-java-(deploy|green)):8080;[[:space:]]*$/\1/p' \
+            | head -n 1)
           if [ -z "$ACTIVE_CONTAINER" ]; then
             echo "ERROR: Could not determine the production backend from Nginx."
             exit 1
