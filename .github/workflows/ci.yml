@@ -66,7 +66,7 @@ jobs:
           docker push "$IMAGE_NAME:$IMAGE_TAG"
 
 
-  # ==========================================================
+    # ==========================================================
   # BLUE/GREEN DEPLOYMENT
   # ==========================================================
   deploy:
@@ -106,14 +106,14 @@ jobs:
           echo "IMAGE_TAG=${GITHUB_SHA}" >> "$GITHUB_ENV"
 
           echo "====================================="
-          echo "NEW IMAGE"
+          echo "IMAGE"
           echo "====================================="
 
           echo "$IMAGE_NAME:$GITHUB_SHA"
 
 
       # ======================================================
-      # 3. Login to GHCR
+      # 3. Login GHCR
       # ======================================================
       - name: Login to GHCR
         uses: docker/login-action@v3
@@ -134,36 +134,27 @@ jobs:
       # ======================================================
       # 5. Verify BLUE
       # ======================================================
-      - name: Verify Blue Environment
+      - name: Verify Blue
         run: |
 
           echo "====================================="
           echo "VERIFYING BLUE"
           echo "====================================="
 
-          if ! docker inspect "$BLUE_CONTAINER" >/dev/null 2>&1; then
-            echo "ERROR: Blue container does not exist."
-            exit 1
-          fi
+          docker inspect "$BLUE_CONTAINER" >/dev/null
 
-          if ! docker ps \
+          docker ps \
             --filter "name=$BLUE_CONTAINER" \
-            --filter "status=running" \
-            -q | grep -q .; then
-
-            echo "ERROR: Blue container is not running."
-            exit 1
-          fi
-
-          echo "Blue container is running."
+            --filter "status=running"
 
           echo ""
           echo "Blue image:"
+
           docker inspect "$BLUE_CONTAINER" \
             --format '{{.Config.Image}}'
 
           echo ""
-          echo "Testing Blue directly..."
+          echo "Blue application:"
 
           curl -fsS \
             "http://localhost:$BLUE_PORT/devops-lab/" \
@@ -173,24 +164,73 @@ jobs:
 
 
       # ======================================================
-      # 6. SAVE BLUE NGINX CONFIG
+      # 6. CREATE BLUE CONFIG
       # ======================================================
-      - name: Save Blue Nginx Configuration
+      - name: Create Blue Nginx Configuration
         run: |
 
           echo "====================================="
-          echo "SAVING BLUE NGINX CONFIG"
+          echo "CREATING BLUE CONFIG"
           echo "====================================="
 
-          cp nginx/nginx.conf /tmp/nginx-blue.conf
+          cat > /tmp/nginx-blue.conf <<'EOF'
+          events {}
+
+          http {
+              upstream blue {
+                  server devops-java-deploy:8080;
+              }
+
+              server {
+                  listen 80;
+
+                  location / {
+                      proxy_pass http://blue;
+                  }
+              }
+          }
+          EOF
 
           echo ""
-          echo "Blue configuration:"
+          echo "BLUE CONFIG:"
           cat /tmp/nginx-blue.conf
 
 
       # ======================================================
-      # 7. Remove Old GREEN
+      # 7. CREATE GREEN CONFIG
+      # ======================================================
+      - name: Create Green Nginx Configuration
+        run: |
+
+          echo "====================================="
+          echo "CREATING GREEN CONFIG"
+          echo "====================================="
+
+          cat > /tmp/nginx-green.conf <<'EOF'
+          events {}
+
+          http {
+              upstream green {
+                  server devops-java-green:8080;
+              }
+
+              server {
+                  listen 80;
+
+                  location / {
+                      proxy_pass http://green;
+                  }
+              }
+          }
+          EOF
+
+          echo ""
+          echo "GREEN CONFIG:"
+          cat /tmp/nginx-green.conf
+
+
+      # ======================================================
+      # 8. REMOVE OLD GREEN
       # ======================================================
       - name: Remove Previous Green
         run: |
@@ -203,9 +243,9 @@ jobs:
 
 
       # ======================================================
-      # 8. Deploy New Version to GREEN
+      # 9. DEPLOY GREEN
       # ======================================================
-      - name: Deploy New Version to Green
+      - name: Deploy Green
         run: |
 
           echo "====================================="
@@ -220,27 +260,24 @@ jobs:
 
           echo ""
           echo "Green container:"
-          docker ps --filter "name=$GREEN_CONTAINER"
 
-          echo ""
-          echo "Green image:"
-          docker inspect "$GREEN_CONTAINER" \
-            --format '{{.Config.Image}}'
+          docker ps \
+            --filter "name=$GREEN_CONTAINER"
 
 
       # ======================================================
-      # 9. GREEN HEALTH CHECK
+      # 10. HEALTH CHECK GREEN
       # ======================================================
       - name: Health Check Green
         run: |
 
           echo "====================================="
-          echo "HEALTH CHECK - GREEN"
+          echo "HEALTH CHECK GREEN"
           echo "====================================="
 
           for i in {1..12}; do
 
-            echo "Health check attempt $i/12"
+            echo "Attempt $i/12"
 
             if curl -fsS \
               "http://localhost:$GREEN_PORT/devops-lab/" \
@@ -248,7 +285,6 @@ jobs:
 
               echo ""
               echo "GREEN IS HEALTHY"
-              echo ""
 
               cat /tmp/green.html
 
@@ -268,28 +304,7 @@ jobs:
 
 
       # ======================================================
-      # 10. PREPARE GREEN NGINX CONFIG
-      # ======================================================
-      - name: Prepare Green Nginx Configuration
-        run: |
-
-          echo "====================================="
-          echo "PREPARING GREEN NGINX CONFIG"
-          echo "====================================="
-
-          cp /tmp/nginx-blue.conf /tmp/nginx-green.conf
-
-          sed -i \
-            's/devops-java-deploy:8080/devops-java-green:8080/' \
-            /tmp/nginx-green.conf
-
-          echo ""
-          echo "Green configuration:"
-          cat /tmp/nginx-green.conf
-
-
-      # ======================================================
-      # 11. SWITCH TRAFFIC TO GREEN
+      # 11. COPY GREEN CONFIG DIRECTLY INTO NGINX CONTAINER
       # ======================================================
       - name: Switch Traffic to Green
         run: |
@@ -299,26 +314,30 @@ jobs:
           echo "BLUE -> GREEN"
           echo "====================================="
 
-          cp /tmp/nginx-green.conf nginx/nginx.conf
+          echo ""
+          echo "Copying GREEN config into Nginx..."
+
+          docker cp \
+            /tmp/nginx-green.conf \
+            "$NGINX_CONTAINER:/etc/nginx/nginx.conf"
 
           echo ""
-          echo "Host Nginx configuration:"
-          cat nginx/nginx.conf
+          echo "Nginx configuration AFTER COPY:"
 
-          echo ""
-          echo "Nginx configuration inside container:"
           docker exec "$NGINX_CONTAINER" \
             cat /etc/nginx/nginx.conf
 
           echo ""
-          echo "Testing Nginx configuration..."
+          echo "Testing Nginx..."
 
-          docker exec "$NGINX_CONTAINER" nginx -t
+          docker exec "$NGINX_CONTAINER" \
+            nginx -t
 
           echo ""
           echo "Reloading Nginx..."
 
-          docker exec "$NGINX_CONTAINER" nginx -s reload
+          docker exec "$NGINX_CONTAINER" \
+            nginx -s reload
 
           echo ""
           echo "Traffic switched to GREEN."
@@ -335,33 +354,35 @@ jobs:
           echo "====================================="
 
           echo ""
-          echo "Active Nginx configuration:"
+          echo "Nginx configuration:"
 
           docker exec "$NGINX_CONTAINER" \
             nginx -T 2>&1
 
           echo ""
-          echo "Checking Green upstream..."
+          echo "Checking GREEN upstream..."
 
           if ! docker exec "$NGINX_CONTAINER" \
             nginx -T 2>&1 | grep -q "devops-java-green:8080"; then
 
+            echo ""
             echo "ERROR: Nginx is NOT pointing to GREEN."
 
             exit 1
           fi
 
+          echo ""
           echo "SUCCESS: Nginx is pointing to GREEN."
 
 
       # ======================================================
-      # 13. VERIFY PRODUCTION TRAFFIC
+      # 13. VERIFY PRODUCTION GREEN
       # ======================================================
-      - name: Verify Production Traffic
+      - name: Verify Production Green
         run: |
 
           echo "====================================="
-          echo "VERIFYING PRODUCTION TRAFFIC"
+          echo "VERIFYING PRODUCTION"
           echo "====================================="
 
           sleep 2
@@ -372,16 +393,17 @@ jobs:
 
           echo ""
           echo "Production response:"
+
           cat /tmp/production.html
 
           echo ""
-          echo "Production traffic is reaching GREEN."
+          echo "Production is serving GREEN."
 
 
       # ======================================================
       # 14. INTENTIONAL FAILURE
       #
-      # REMOVE THIS STEP AFTER TESTING ROLLBACK
+      # REMOVE THIS AFTER ROLLBACK TEST
       # ======================================================
       - name: Simulate Production Failure
         run: |
@@ -400,14 +422,14 @@ jobs:
 
 
       # ======================================================
-      # 15. DEPLOYMENT SUCCESS
+      # 15. SUCCESS
       # ======================================================
       - name: Deployment Successful
         if: success()
         run: |
 
           echo "====================================="
-          echo "DEPLOYMENT SUCCESSFUL"
+          echo "BLUE/GREEN DEPLOYMENT SUCCESSFUL"
           echo "====================================="
 
           echo "Image: $IMAGE_NAME:$IMAGE_TAG"
@@ -415,7 +437,7 @@ jobs:
 
 
       # ======================================================
-      # 16. AUTOMATIC ROLLBACK TO BLUE
+      # 16. AUTOMATIC ROLLBACK
       # ======================================================
       - name: Automatic Rollback to Blue
         if: failure()
@@ -428,69 +450,51 @@ jobs:
           echo "====================================="
 
 
-          # --------------------------------------------------
-          # Green logs
-          # --------------------------------------------------
           echo ""
-          echo "Green container logs:"
+          echo "Green logs:"
 
           docker logs "$GREEN_CONTAINER" 2>/dev/null || true
 
 
           # --------------------------------------------------
-          # Restore BLUE configuration
+          # Copy BLUE configuration directly into Nginx
           # --------------------------------------------------
           echo ""
           echo "Restoring BLUE Nginx configuration..."
 
-          cp /tmp/nginx-blue.conf nginx/nginx.conf
+          docker cp \
+            /tmp/nginx-blue.conf \
+            "$NGINX_CONTAINER:/etc/nginx/nginx.conf"
 
 
           # --------------------------------------------------
-          # Show host config
-          # --------------------------------------------------
-          echo ""
-          echo "Host configuration after rollback:"
-
-          cat nginx/nginx.conf
-
-
-          # --------------------------------------------------
-          # Show container config BEFORE reload
+          # Verify configuration
           # --------------------------------------------------
           echo ""
-          echo "Nginx container configuration BEFORE reload:"
+          echo "Nginx configuration after restore:"
 
           docker exec "$NGINX_CONTAINER" \
             cat /etc/nginx/nginx.conf
 
 
           # --------------------------------------------------
-          # Validate Nginx
+          # Test configuration
           # --------------------------------------------------
           echo ""
-          echo "Validating Nginx..."
+          echo "Testing Nginx configuration..."
 
-          docker exec "$NGINX_CONTAINER" nginx -t
+          docker exec "$NGINX_CONTAINER" \
+            nginx -t
 
 
           # --------------------------------------------------
-          # Reload Nginx
+          # Reload
           # --------------------------------------------------
           echo ""
           echo "Reloading Nginx..."
 
-          docker exec "$NGINX_CONTAINER" nginx -s reload
-
-
-          # --------------------------------------------------
-          # Show container config AFTER reload
-          # --------------------------------------------------
-          echo ""
-          echo "Nginx container configuration AFTER reload:"
-
           docker exec "$NGINX_CONTAINER" \
-            cat /etc/nginx/nginx.conf
+            nginx -s reload
 
 
           # --------------------------------------------------
@@ -501,21 +505,20 @@ jobs:
           echo "VERIFYING BLUE ROUTING"
           echo "====================================="
 
+          docker exec "$NGINX_CONTAINER" \
+            nginx -T 2>&1
+
+
           if ! docker exec "$NGINX_CONTAINER" \
             nginx -T 2>&1 | grep -q "devops-java-deploy:8080"; then
 
             echo ""
             echo "ERROR: Nginx is NOT pointing to BLUE."
 
-            echo ""
-            echo "Actual Nginx configuration:"
-
-            docker exec "$NGINX_CONTAINER" \
-              nginx -T 2>&1 || true
-
             exit 1
           fi
 
+          echo ""
           echo "SUCCESS: Nginx is pointing to BLUE."
 
 
@@ -524,7 +527,7 @@ jobs:
           # --------------------------------------------------
           echo ""
           echo "====================================="
-          echo "VERIFYING PRODUCTION TRAFFIC"
+          echo "VERIFYING PRODUCTION BLUE"
           echo "====================================="
 
           sleep 2
@@ -540,41 +543,25 @@ jobs:
 
 
           # --------------------------------------------------
-          # Verify Blue Version
-          #
-          # Change V5 if your actual Blue version is different.
+          # Verify V5
           # --------------------------------------------------
-          echo ""
-          echo "Checking Blue application version..."
-
           if ! grep -q "Application Versioning:V5" /tmp/rollback.html; then
 
             echo ""
-            echo "ERROR: Production is NOT serving BLUE V5."
+            echo "ERROR: Production is NOT serving Blue V5."
 
             exit 1
           fi
 
 
-          # --------------------------------------------------
-          # SUCCESS
-          # --------------------------------------------------
           echo ""
           echo "====================================="
           echo "ROLLBACK SUCCESSFUL"
           echo "====================================="
 
           echo ""
-          echo "Traffic:"
-          echo "Production -> Nginx -> Blue"
-
-          echo ""
-          echo "Blue version:"
-          echo "V5"
-
-          echo ""
-          echo "Green version:"
-          echo "V6"
+          echo "Production -> Nginx -> BLUE"
+          echo "Blue version: V5"
 
           echo ""
           echo "====================================="
@@ -583,7 +570,7 @@ jobs:
       # ======================================================
       # 17. FINAL STATE
       # ======================================================
-      - name: Show Final Container State
+      - name: Show Final State
         if: always()
         run: |
 
@@ -603,4 +590,5 @@ jobs:
           echo "====================================="
 
           docker exec "$NGINX_CONTAINER" \
-            nginx -T 2>&1 || true
+            cat /etc/nginx/nginx.conf || true
+
