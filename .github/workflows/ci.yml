@@ -291,8 +291,20 @@ jobs:
 
           echo "Production traffic successfully reaches GREEN."
 
-
       # ==========================================
+      # TEMPORARY ROLLBACK TEST
+      # REMOVE AFTER TESTING
+      # ==========================================
+
+      - name: simulate Post-Deployment Failure
+        if : success()
+        run: |
+          echo "====================================="
+          echo "   SIMULATING POST-DEPLOYMENT FAILURE"
+          echo "====================================="
+
+          exit 1    # ==========================================
+
       # 13. Deployment Successful
       # ==========================================
       - name: Deployment Successful
@@ -310,7 +322,7 @@ jobs:
       # ==========================================
       # 14. Rollback Traffic to BLUE
       # ==========================================
-      - name: Rollback Traffic to Blue
+      - name: Automatic Rollback Traffic to Blue 
         if: failure()
         run: |
           echo "====================================="
@@ -344,10 +356,15 @@ jobs:
 
           cat /tmp/rollback.html
 
-          echo "====================================="
-          echo "       ROLLBACK SUCCESSFUL"
-          echo "       BLUE IS ACTIVE"
-          echo "====================================="
+          if grep -q "Application Versioning:V4" /tmp/rollback.html; then
+            echo "====================================="
+            echo "       ROLLBACK SUCCESSFUL"
+            echo "       BLUE IS ACTIVE"
+            echo "====================================="
+          else
+            echo "Rollback verification FAILED"
+            exit 1
+          fi
 
 
       # ==========================================
