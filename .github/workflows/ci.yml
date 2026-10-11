@@ -4,7 +4,6 @@ on:
   push:
     branches:
       - main
-
   pull_request:
     branches:
       - main
@@ -16,17 +15,16 @@ permissions:
 env:
   IMAGE_NAME: ghcr.io/aashish-cyber/devops-java-lab
 
-jobs:
+concurrency:
+  group: java-devops-lab-deployment
+  cancel-in-progress: false
 
-  # ==========================================================
-  # CI
-  # ==========================================================
+jobs:
   build:
     name: Build, Test & Push Image
     runs-on: [self-hosted, linux, x64]
 
     steps:
-
       - name: Checkout Code
         uses: actions/checkout@v4
 
@@ -40,13 +38,11 @@ jobs:
         run: mvn clean package
 
       - name: Verify WAR Artifact
-        run: |
-          ls -lh target/*.war
+        run: ls -lh target/*.war
 
       - name: Generate Image Tag
         run: |
           echo "IMAGE_TAG=${GITHUB_SHA}" >> "$GITHUB_ENV"
-          echo "Image tag: ${GITHUB_SHA}"
 
       - name: Build Docker Image
         run: |
@@ -55,6 +51,7 @@ jobs:
             .
 
       - name: Login to GHCR
+        if: github.event_name == 'push'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -62,59 +59,43 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Push Image to GHCR
-        run: |
-          docker push "$IMAGE_NAME:$IMAGE_TAG"
+        if: github.event_name == 'push'
+        run: docker push "$IMAGE_NAME:$IMAGE_TAG"
 
-
-    # ==========================================================
-  # BLUE/GREEN DEPLOYMENT
-  # ==========================================================
   deploy:
     name: Blue/Green Deployment
-
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-
     needs: build
-
     runs-on: [self-hosted, linux, x64]
 
-    env:
-      BLUE_CONTAINER: devops-java-deploy
-      GREEN_CONTAINER: devops-java-green
-      NGINX_CONTAINER: devops-nginx
-
-      DOCKER_NETWORK: blue-green-net
-
-      BLUE_PORT: 8082
-      GREEN_PORT: 8083
-      PRODUCTION_PORT: 8080
-
     steps:
-
-      # ======================================================
-      # 1. Checkout
-      # ======================================================
       - name: Checkout Code
         uses: actions/checkout@v4
 
-
-      # ======================================================
-      # 2. Generate Image Tag
-      # ======================================================
-      - name: Generate Image Tag
+      - name: Verify Deployment Prerequisites
+        shell: bash
         run: |
-          echo "IMAGE_TAG=${GITHUB_SHA}" >> "$GITHUB_ENV"
+          set -euo pipefail
 
-          echo "====================================="
-          echo "IMAGE"
-          echo "====================================="
+          PROJECT_DIR="/home/ranaa/devops-lab/java-tomcat"
 
-          echo "$IMAGE_NAME:$GITHUB_SHA"
+          test -f "$PROJECT_DIR/.env"
+          test -f "$PROJECT_DIR/compose.yaml"
+          test -f "$PROJECT_DIR/nginx/nginx.conf"
+          test -f "$GITHUB_WORKSPACE/scripts/deploy-compose.sh"
 
+          bash -n "$GITHUB_WORKSPACE/scripts/deploy-compose.sh"
 
-      # ======================================================
-      # 3. Login GHCR
-      # ======================================================
+          docker compose \
+            -p java-devops-lab \
+            -f "$PROJECT_DIR/compose.yaml" \
+            config --quiet
+
+          docker compose \
+            -p java-devops-lab \
+            -f "$PROJECT_DIR/compose.yaml" \
+            ps
+
       - name: Login to GHCR
         uses: docker/login-action@v3
         with:
@@ -122,473 +103,29 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-
-      # ======================================================
-      # 4. Pull New Image
-      # ======================================================
-      - name: Pull New Image
+      - name: Deploy New Image
+        shell: bash
+        env:
+          DEPLOY_IMAGE: ${{ env.IMAGE_NAME }}:${{ github.sha }}
         run: |
-          docker pull "$IMAGE_NAME:$IMAGE_TAG"
+          set -euo pipefail
 
+          bash "$GITHUB_WORKSPACE/scripts/deploy-compose.sh" \
+            "$DEPLOY_IMAGE"
 
-      # ======================================================
-      # 5. Verify BLUE
-      # ======================================================
-      - name: Verify Blue
-        run: |
-
-          echo "====================================="
-          echo "VERIFYING BLUE"
-          echo "====================================="
-
-          docker inspect "$BLUE_CONTAINER" >/dev/null
-
-          docker ps \
-            --filter "name=$BLUE_CONTAINER" \
-            --filter "status=running"
-
-          echo ""
-          echo "Blue image:"
-
-          docker inspect "$BLUE_CONTAINER" \
-            --format '{{.Config.Image}}'
-
-          echo ""
-          echo "Blue application:"
-
-          curl -fsS \
-            "http://localhost:$BLUE_PORT/devops-lab/" \
-            > /tmp/blue.html
-
-          cat /tmp/blue.html
-
-
-      # ======================================================
-      # 6. CREATE BLUE CONFIG
-      # ======================================================
-      - name: Create Blue Nginx Configuration
-        run: |
-
-          echo "====================================="
-          echo "CREATING BLUE CONFIG"
-          echo "====================================="
-
-          cat > /tmp/nginx-blue.conf <<'EOF'
-          events {}
-
-          http {
-              upstream blue {
-                  server devops-java-deploy:8080;
-              }
-
-              server {
-                  listen 80;
-
-                  location / {
-                      proxy_pass http://blue;
-                  }
-              }
-          }
-          EOF
-
-          echo ""
-          echo "BLUE CONFIG:"
-          cat /tmp/nginx-blue.conf
-
-
-      # ======================================================
-      # 7. CREATE GREEN CONFIG
-      # ======================================================
-      - name: Create Green Nginx Configuration
-        run: |
-
-          echo "====================================="
-          echo "CREATING GREEN CONFIG"
-          echo "====================================="
-
-          cat > /tmp/nginx-green.conf <<'EOF'
-          events {}
-
-          http {
-              upstream green {
-                  server devops-java-green:8080;
-              }
-
-              server {
-                  listen 80;
-
-                  location / {
-                      proxy_pass http://green;
-                  }
-              }
-          }
-          EOF
-
-          echo ""
-          echo "GREEN CONFIG:"
-          cat /tmp/nginx-green.conf
-
-
-      # ======================================================
-      # 8. REMOVE OLD GREEN
-      # ======================================================
-      - name: Remove Previous Green
-        run: |
-
-          echo "====================================="
-          echo "REMOVING OLD GREEN"
-          echo "====================================="
-
-          docker rm -f "$GREEN_CONTAINER" 2>/dev/null || true
-
-
-      # ======================================================
-      # 9. DEPLOY GREEN
-      # ======================================================
-      - name: Deploy Green
-        run: |
-
-          echo "====================================="
-          echo "DEPLOYING NEW VERSION TO GREEN"
-          echo "====================================="
-
-          docker run -d \
-            --name "$GREEN_CONTAINER" \
-            --network "$DOCKER_NETWORK" \
-            -p "$GREEN_PORT:8080" \
-            "$IMAGE_NAME:$IMAGE_TAG"
-
-          echo ""
-          echo "Green container:"
-
-          docker ps \
-            --filter "name=$GREEN_CONTAINER"
-
-
-      # ======================================================
-      # 10. HEALTH CHECK GREEN
-      # ======================================================
-      - name: Health Check Green
-        run: |
-
-          echo "====================================="
-          echo "HEALTH CHECK GREEN"
-          echo "====================================="
-
-          for i in {1..12}; do
-
-            echo "Attempt $i/12"
-
-            if curl -fsS \
-              "http://localhost:$GREEN_PORT/devops-lab/" \
-              > /tmp/green.html; then
-
-              echo ""
-              echo "GREEN IS HEALTHY"
-
-              cat /tmp/green.html
-
-              exit 0
-            fi
-
-            sleep 5
-
-          done
-
-          echo ""
-          echo "GREEN HEALTH CHECK FAILED"
-
-          docker logs "$GREEN_CONTAINER" || true
-
-          exit 1
-
-
-      # ======================================================
-      # 11. COPY GREEN CONFIG DIRECTLY INTO NGINX CONTAINER
-      # ======================================================
-      - name: Switch Traffic to Green
-        run: |
-
-          echo "====================================="
-          echo "SWITCHING TRAFFIC"
-          echo "BLUE -> GREEN"
-          echo "====================================="
-
-          echo ""
-          echo "Copying GREEN config into Nginx..."
-
-          docker cp \
-            /tmp/nginx-green.conf \
-            "$NGINX_CONTAINER:/etc/nginx/nginx.conf"
-
-          echo ""
-          echo "Nginx configuration AFTER COPY:"
-
-          docker exec "$NGINX_CONTAINER" \
-            cat /etc/nginx/nginx.conf
-
-          echo ""
-          echo "Testing Nginx..."
-
-          docker exec "$NGINX_CONTAINER" \
-            nginx -t
-
-          echo ""
-          echo "Reloading Nginx..."
-
-          docker exec "$NGINX_CONTAINER" \
-            nginx -s reload
-
-          echo ""
-          echo "Traffic switched to GREEN."
-
-
-      # ======================================================
-      # 12. VERIFY GREEN ROUTING
-      # ======================================================
-      - name: Verify Green Routing
-        run: |
-
-          echo "====================================="
-          echo "VERIFYING GREEN ROUTING"
-          echo "====================================="
-
-          echo ""
-          echo "Nginx configuration:"
-
-          docker exec "$NGINX_CONTAINER" \
-            nginx -T 2>&1
-
-          echo ""
-          echo "Checking GREEN upstream..."
-
-          if ! docker exec "$NGINX_CONTAINER" \
-            nginx -T 2>&1 | grep -q "devops-java-green:8080"; then
-
-            echo ""
-            echo "ERROR: Nginx is NOT pointing to GREEN."
-
-            exit 1
-          fi
-
-          echo ""
-          echo "SUCCESS: Nginx is pointing to GREEN."
-
-
-      # ======================================================
-      # 13. VERIFY PRODUCTION GREEN
-      # ======================================================
-      - name: Verify Production Green
-        run: |
-
-          echo "====================================="
-          echo "VERIFYING PRODUCTION"
-          echo "====================================="
-
-          sleep 2
-
-          curl -fsS \
-            "http://localhost:$PRODUCTION_PORT/devops-lab/" \
-            > /tmp/production.html
-
-          echo ""
-          echo "Production response:"
-
-          cat /tmp/production.html
-
-          echo ""
-          echo "Production is serving GREEN."
-
-
-      # ======================================================
-      # 14. INTENTIONAL FAILURE
-      #
-      # REMOVE THIS AFTER ROLLBACK TEST
-      # ======================================================
-      - name: Simulate Production Failure
-        run: |
-
-          echo "====================================="
-          echo "SIMULATING PRODUCTION FAILURE"
-          echo "====================================="
-
-          echo ""
-          echo "GREEN is currently serving production."
-
-          echo ""
-          echo "Intentionally failing deployment..."
-
-          exit 1
-
-
-      # ======================================================
-      # 15. SUCCESS
-      # ======================================================
-      - name: Deployment Successful
-        if: success()
-        run: |
-
-          echo "====================================="
-          echo "BLUE/GREEN DEPLOYMENT SUCCESSFUL"
-          echo "====================================="
-
-          echo "Image: $IMAGE_NAME:$IMAGE_TAG"
-          echo "Active environment: GREEN"
-
-
-      # ======================================================
-      # 16. AUTOMATIC ROLLBACK
-      # ======================================================
-      - name: Automatic Rollback to Blue
-        if: failure()
-        run: |
-
-          echo "====================================="
-          echo "DEPLOYMENT FAILED"
-          echo "ROLLING BACK"
-          echo "GREEN -> BLUE"
-          echo "====================================="
-
-
-          echo ""
-          echo "Green logs:"
-
-          docker logs "$GREEN_CONTAINER" 2>/dev/null || true
-
-
-          # --------------------------------------------------
-          # Copy BLUE configuration directly into Nginx
-          # --------------------------------------------------
-          echo ""
-          echo "Restoring BLUE Nginx configuration..."
-
-          docker cp \
-            /tmp/nginx-blue.conf \
-            "$NGINX_CONTAINER:/etc/nginx/nginx.conf"
-
-
-          # --------------------------------------------------
-          # Verify configuration
-          # --------------------------------------------------
-          echo ""
-          echo "Nginx configuration after restore:"
-
-          docker exec "$NGINX_CONTAINER" \
-            cat /etc/nginx/nginx.conf
-
-
-          # --------------------------------------------------
-          # Test configuration
-          # --------------------------------------------------
-          echo ""
-          echo "Testing Nginx configuration..."
-
-          docker exec "$NGINX_CONTAINER" \
-            nginx -t
-
-
-          # --------------------------------------------------
-          # Reload
-          # --------------------------------------------------
-          echo ""
-          echo "Reloading Nginx..."
-
-          docker exec "$NGINX_CONTAINER" \
-            nginx -s reload
-
-
-          # --------------------------------------------------
-          # Verify BLUE routing
-          # --------------------------------------------------
-          echo ""
-          echo "====================================="
-          echo "VERIFYING BLUE ROUTING"
-          echo "====================================="
-
-          docker exec "$NGINX_CONTAINER" \
-            nginx -T 2>&1
-
-
-          if ! docker exec "$NGINX_CONTAINER" \
-            nginx -T 2>&1 | grep -q "devops-java-deploy:8080"; then
-
-            echo ""
-            echo "ERROR: Nginx is NOT pointing to BLUE."
-
-            exit 1
-          fi
-
-          echo ""
-          echo "SUCCESS: Nginx is pointing to BLUE."
-
-
-          # --------------------------------------------------
-          # Verify production
-          # --------------------------------------------------
-          echo ""
-          echo "====================================="
-          echo "VERIFYING PRODUCTION BLUE"
-          echo "====================================="
-
-          sleep 2
-
-          curl -fsS \
-            "http://localhost:$PRODUCTION_PORT/devops-lab/" \
-            > /tmp/rollback.html
-
-          echo ""
-          echo "Production response:"
-
-          cat /tmp/rollback.html
-
-
-          # --------------------------------------------------
-          # Verify V5
-          # --------------------------------------------------
-          if ! grep -q "Application Versioning:V5" /tmp/rollback.html; then
-
-            echo ""
-            echo "ERROR: Production is NOT serving Blue V5."
-
-            exit 1
-          fi
-
-
-          echo ""
-          echo "====================================="
-          echo "ROLLBACK SUCCESSFUL"
-          echo "====================================="
-
-          echo ""
-          echo "Production -> Nginx -> BLUE"
-          echo "Blue version: V5"
-
-          echo ""
-          echo "====================================="
-
-
-      # ======================================================
-      # 17. FINAL STATE
-      # ======================================================
       - name: Show Final State
         if: always()
+        shell: bash
         run: |
+          PROJECT_DIR="/home/ranaa/devops-lab/java-tomcat"
 
-          echo "====================================="
-          echo "FINAL CONTAINER STATE"
-          echo "====================================="
+          docker compose \
+            -p java-devops-lab \
+            -f "$PROJECT_DIR/compose.yaml" \
+            ps -a
 
-          docker ps \
-            --filter "name=$BLUE_CONTAINER" \
-            --filter "name=$GREEN_CONTAINER" \
-            --filter "name=$NGINX_CONTAINER" \
-            --format "table {{.Names}}\t{{.Image}}\t{{.Ports}}"
+          curl -fsS \
+            http://localhost:8080/devops-lab/ || true
 
-          echo ""
-          echo "====================================="
-          echo "FINAL NGINX CONFIG"
-          echo "====================================="
-
-          docker exec "$NGINX_CONTAINER" \
-            cat /etc/nginx/nginx.conf || true
-
+          grep 'server devops-java-' \
+            "$PROJECT_DIR/nginx/nginx.conf" || true
